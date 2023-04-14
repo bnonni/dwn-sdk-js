@@ -7,7 +7,12 @@ import { ProtocolDefinition, ProtocolRuleSet, ProtocolsConfigureMessage } from '
 
 const methodToAllowedActionMap = {
   [DwnMethodName.Write]: 'write',
+  [DwnMethodName.Query]: 'query',
 };
+
+/**
+ * looks setup for only authorizing write events, and performs various functions on RecordsWrite events. I assume I would need to create all the corresponding RecordsRead types? In addition, 
+ */
 
 export class ProtocolAuthorization {
 
