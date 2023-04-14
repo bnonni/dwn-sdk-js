@@ -2,7 +2,7 @@ import type { SignatureInput } from '../jose/jws/general/types.js';
 import type { BaseDecodedAuthorizationPayload, BaseMessage, Descriptor, TimestampedMessage } from './types.js';
 
 import { computeCid } from '../utils/cid.js';
-import { GeneralJws } from '../jose/jws/general/types.js';
+import type { GeneralJws } from '../jose/jws/general/types.js';
 import { GeneralJwsSigner } from '../jose/jws/general/signer.js';
 import { Jws } from '../utils/jws.js';
 import { lexicographicalCompare } from '../utils/string.js';
@@ -19,23 +19,26 @@ export enum DwnMethodName {
   Configure = 'Configure',
   Grant = 'Grant',
   Query = 'Query',
+  Read = 'Read',
   Request = 'Request',
   Write = 'Write',
   Delete = 'Delete'
 }
 
-export abstract class Message {
-  readonly message: BaseMessage;
+export abstract class Message<M extends BaseMessage> {
+  readonly message: M;
   readonly authorizationPayload: any;
 
   // commonly used properties for extra convenience;
-  readonly author: string;
+  readonly author: string | undefined;
 
-  constructor(message: BaseMessage) {
+  constructor(message: M) {
     this.message = message;
-    this.authorizationPayload = Jws.decodePlainObjectPayload(message.authorization);
 
-    this.author = Message.getAuthor(message);
+    if (message.authorization !== undefined) {
+      this.authorizationPayload = Jws.decodePlainObjectPayload(message.authorization);
+      this.author = Message.getAuthor(message as BaseMessage);
+    }
   }
 
   /**
@@ -59,9 +62,13 @@ export abstract class Message {
   };
 
   /**
-   * Gets the DID of the author of the given message.
+   * Gets the DID of the author of the given message, returned `undefined` if message is not signed.
    */
-  public static getAuthor(message: BaseMessage): string {
+  public static getAuthor(message: BaseMessage): string | undefined {
+    if (message.authorization === undefined) {
+      return undefined;
+    }
+
     const author = Jws.getSignerDid(message.authorization.signatures[0]);
     return author;
   }
@@ -70,15 +77,11 @@ export abstract class Message {
    * Gets the CID of the given message.
    */
   public static async getCid(message: BaseMessage): Promise<string> {
-    const messageCopy = { ...message };
-
-    // TODO: Once #219 (https://github.com/TBD54566975/dwn-sdk-js/issues/219) is implemented,
-    // `encodedData` will likely not exist directly as part of the message
-    if (messageCopy['encodedData'] !== undefined) {
-      delete (messageCopy as any).encodedData;
-    }
-
-    const cid = await computeCid(messageCopy);
+    // NOTE: we wrap the `computeCid()` here in case that
+    // the message will contain properties that should not be part of the CID computation
+    // and we need to strip them out (like `encodedData` that we historically had for a long time),
+    // but we can remove this method entirely if the code becomes stable and it is apparent that the wrapper is not needed
+    const cid = await computeCid(message);
     return cid;
   }
 

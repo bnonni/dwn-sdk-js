@@ -1,5 +1,5 @@
 import type { BaseMessage } from '../../core/types.js';
-import { DwnInterfaceName, DwnMethodName } from '../../core/message.js';
+import type { DwnInterfaceName, DwnMethodName } from '../../core/message.js';
 
 export type ProtocolsConfigureDescriptor = {
   interface : DwnInterfaceName.Protocols;
@@ -22,6 +22,10 @@ export type ProtocolRuleSet = {
   allow?: {
     anyone?: {
       to: string[];
+    };
+    author?: {
+      of: string,
+      to: string[],
     };
     recipient?: {
       of: string,

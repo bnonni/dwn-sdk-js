@@ -1,13 +1,12 @@
-import type { DidDocument, DidMethodResolver, DidResolutionResult } from './did-resolver.js';
-
 import varint from 'varint';
+import type { DidDocument, DidMethodResolver, DidResolutionResult } from './did-resolver.js';
 
 import { base58btc } from 'multiformats/bases/base58';
 import { Did } from './did.js';
 import { ed25519 } from '../../src/jose/algorithms/signing/ed25519.js';
 import { Encoder } from '../utils/encoder.js';
-import { secp256k1 } from '../jose/algorithms/signing/secp256k1.js';
-import { KeyMaterial, PublicJwk } from '../jose/types.js';
+import { Secp256k1 } from '../utils/secp256k1.js';
+import type { KeyMaterial, PublicJwk } from '../jose/types.js';
 
 /**
  * did:key Resolver.
@@ -44,7 +43,7 @@ export class DidKeyResolver implements DidMethodResolver {
     return multicodecHeaderSize;
   }
 
-  async resolve(did): Promise<DidResolutionResult> {
+  async resolve(did: string): Promise<DidResolutionResult> {
     const [_scheme, _method, id] = did.split(':', 3);
 
     try {
@@ -54,7 +53,7 @@ export class DidKeyResolver implements DidMethodResolver {
       const publicKeyBytes = idBytes.slice(multicodecSize);
 
       // key specific values
-      const keySpecificContext = [];
+      const keySpecificContext: string[] = [];
       let publicJwk: PublicJwk;
       if (multicodec === 0xed) {
         // ed25519-pub multicodec
@@ -62,7 +61,7 @@ export class DidKeyResolver implements DidMethodResolver {
         publicJwk = await ed25519.publicKeyToJwk(publicKeyBytes);
       } else if (multicodec === 0xe7) {
         // secp256k1-pub multicodec
-        publicJwk = await secp256k1.publicKeyToJwk(publicKeyBytes);
+        publicJwk = await Secp256k1.publicKeyToJwk(publicKeyBytes);
       } else {
         throw Error(`key type of multicodec ${multicodec} is not supported`);
       }
@@ -96,7 +95,7 @@ export class DidKeyResolver implements DidMethodResolver {
       };
     } catch {
       return {
-        didDocument           : null,
+        didDocument           : undefined,
         didDocumentMetadata   : {},
         didResolutionMetadata : {
           error: 'invalidDid'
@@ -134,4 +133,7 @@ export class DidKeyResolver implements DidMethodResolver {
     const keyId = `${did}#${methodSpecificId}`;
     return keyId;
   };
+
+  async dump(): Promise<void> {
+  }
 }

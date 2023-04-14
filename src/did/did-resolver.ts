@@ -71,6 +71,22 @@ export class DidResolver {
 
     return resolutionResult;
   }
+
+  async dump(): Promise<void> {
+    console.group('didResolvers');
+    for (const [ key, value ] of this.didResolvers) {
+      console.group(key);
+      // @ts-ignore
+      await value['dump']?.();
+      console.groupEnd();
+    }
+    console.groupEnd();
+
+    console.group('didCache');
+    // @ts-ignore
+    await this.cache['dump']?.();
+    console.groupEnd();
+  }
 }
 
 /**

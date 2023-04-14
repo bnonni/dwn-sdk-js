@@ -1,12 +1,13 @@
+import type { RecordsWriteMessage } from '../../../../src/interfaces/records/types.js';
+
 import chaiAsPromised from 'chai-as-promised';
 import sinon from 'sinon';
 import chai, { expect } from 'chai';
 
+import { DwnErrorCode } from '../../../../src/core/dwn-error.js';
 import { Jws } from '../../../../src/index.js';
-import { Message } from '../../../../src/core/message.js';
 import { MessageStoreLevel } from '../../../../src/store/message-store-level.js';
 import { RecordsWrite } from '../../../../src/interfaces/records/messages/records-write.js';
-import { RecordsWriteMessage } from '../../../../src/interfaces/records/types.js';
 import { TestDataGenerator } from '../../../utils/test-data-generator.js';
 import { getCurrentTimeInHighPrecision, sleep } from '../../../../src/utils/time.js';
 
@@ -92,6 +93,36 @@ describe('RecordsWrite', () => {
       await expect(createPromise2).to.be.rejectedWith('one and only one parameter between `data` and `dataCid` is allowed');
     });
 
+    it('should required `dataCid` and `dataSize` to be both defined or undefined at the same time', async () => {
+      const alice = await TestDataGenerator.generatePersona();
+
+      const options1 = {
+        recipient                   : alice.did,
+        dataCid                     : await TestDataGenerator.randomCborSha256Cid(),
+        // dataSize                  : 123, // intentionally missing
+        dataFormat                  : 'application/json',
+        recordId                    : await TestDataGenerator.randomCborSha256Cid(),
+        published                   : true,
+        authorizationSignatureInput : Jws.createSignatureInput(alice)
+      };
+      const createPromise1 = RecordsWrite.create(options1);
+
+      await expect(createPromise1).to.be.rejectedWith('`dataCid` and `dataSize` must both be defined or undefined at the same time');
+
+      const options2 = {
+        recipient                   : alice.did,
+        data                        : TestDataGenerator.randomBytes(10),
+        // dataCid                   : await TestDataGenerator.randomCborSha256Cid(), // intentionally missing
+        dataSize                    : 123,
+        dataFormat                  : 'application/json',
+        recordId                    : await TestDataGenerator.randomCborSha256Cid(),
+        published                   : true,
+        authorizationSignatureInput : Jws.createSignatureInput(alice)
+      };
+      const createPromise2 = RecordsWrite.create(options2);
+
+      await expect(createPromise2).to.be.rejectedWith('`dataCid` and `dataSize` must both be defined or undefined at the same time');
+    });
   });
 
   describe('createFrom()', () => {
@@ -134,20 +165,6 @@ describe('RecordsWrite', () => {
     });
   });
 
-  describe('getCid', () => {
-    it('should return the same value with or without `encodedData`', async () => {
-      const messageData = await TestDataGenerator.generateRecordsWrite();
-
-      const messageWithEncodedData = { ...messageData.message };
-      messageWithEncodedData['encodedData'] = 'dW51c2Vk';
-
-      const cidOfMessageWithoutEncodedData = await Message.getCid(messageData.message);
-      const cidOfMessageWithEncodedData = await Message.getCid(messageWithEncodedData);
-
-      expect(cidOfMessageWithoutEncodedData).to.equal(cidOfMessageWithEncodedData);
-    });
-  });
-
   describe('isInitialWrite', () => {
     it('should return false if given message is not a RecordsWrite', async () => {
       const { message }= await TestDataGenerator.generateRecordsQuery();
@@ -155,5 +172,12 @@ describe('RecordsWrite', () => {
       expect(isInitialWrite).to.be.false;
     });
   });
-});
 
+  describe('getEntryId', () => {
+    it('should throw if the given author is undefined', async () => {
+      const { message }= await TestDataGenerator.generateRecordsWrite();
+      const author = undefined;
+      expect(RecordsWrite.getEntryId(author, message.descriptor)).to.be.rejectedWith(DwnErrorCode.RecordsWriteGetEntryIdUndefinedAuthor);
+    });
+  });
+});

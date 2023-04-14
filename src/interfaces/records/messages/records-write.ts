@@ -1,19 +1,34 @@
 import type { BaseMessage } from '../../../core/types.js';
-import type { RecordsWriteAttestationPayload, RecordsWriteAuthorizationPayload, RecordsWriteDescriptor, RecordsWriteMessage, UnsignedRecordsWriteMessage } from '../types.js';
+import type { DerivedPublicJwk } from '../../../utils/hd-key.js';
+import type { MessageStore } from '../../../store/message-store.js';
+import type {
+  EncryptedKey,
+  EncryptionProperty,
+  RecordsWriteAttestationPayload,
+  RecordsWriteAuthorizationPayload,
+  RecordsWriteDescriptor,
+  RecordsWriteMessage,
+  UnsignedRecordsWriteMessage
+} from '../types.js';
+import type { GeneralJws, SignatureInput } from '../../../jose/jws/general/types.js';
 
 import { Encoder } from '../../../utils/encoder.js';
+import { Encryption } from '../../../utils/encryption.js';
+import { EncryptionAlgorithm } from '../../../utils/encryption.js';
 import { GeneralJwsSigner } from '../../../jose/jws/general/signer.js';
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { Jws } from '../../../utils/jws.js';
+import { KeyDerivationScheme } from '../../../utils/hd-key.js';
 import { Message } from '../../../core/message.js';
-import { MessageStore } from '../../../store/message-store.js';
 import { ProtocolAuthorization } from '../../../core/protocol-authorization.js';
+import { Records } from '../../../utils/records.js';
 import { removeUndefinedProperties } from '../../../utils/object.js';
+import { Secp256k1 } from '../../../utils/secp256k1.js';
 
 import { authorize, validateAuthorizationIntegrity } from '../../../core/auth.js';
-import { computeCid, computeDagPbCid } from '../../../utils/cid.js';
+import { Cid, computeCid } from '../../../utils/cid.js';
+import { DwnError, DwnErrorCode } from '../../../core/dwn-error.js';
 import { DwnInterfaceName, DwnMethodName } from '../../../core/message.js';
-import { GeneralJws, SignatureInput } from '../../../jose/jws/general/types.js';
 
 export type RecordsWriteOptions = {
   recipient?: string;
@@ -24,6 +39,7 @@ export type RecordsWriteOptions = {
   parentId?: string;
   data?: Uint8Array;
   dataCid?: string;
+  dataSize?: number;
   dateCreated?: string;
   dateModified?: string;
   published?: boolean;
@@ -31,6 +47,48 @@ export type RecordsWriteOptions = {
   dataFormat: string;
   authorizationSignatureInput: SignatureInput;
   attestationSignatureInputs?: SignatureInput[];
+  encryptionInput?: EncryptionInput;
+};
+
+/**
+ * Input that describes how data is encrypted as spec-ed in TP18 (https://github.com/TBD54566975/technical-proposals/pull/6).
+ */
+export type EncryptionInput = {
+  /**
+   * Algorithm used for encrypting the Data. Uses {EncryptionAlgorithm.Aes256Ctr} if not given.
+   */
+  algorithm?: EncryptionAlgorithm;
+
+  /**
+   * Initialization vector used for encrypting the data.
+   */
+  initializationVector: Uint8Array;
+
+  /**
+   * Symmetric key used to encrypt the data.
+   */
+  key: Uint8Array;
+
+  /**
+   * Array of input that specifies how the symmetric key is encrypted.
+   * Each entry in the array will result in a unique ciphertext of the symmetric key.
+   */
+  keyEncryptionInputs: KeyEncryptionInput[];
+};
+
+/**
+ * Input that specifies how a symmetric key is encrypted.
+ */
+export type KeyEncryptionInput = {
+  /**
+   * Public key used to encrypt the symmetric key.
+   */
+  publicKey: DerivedPublicJwk;
+
+  /**
+   * Algorithm used for encrypting the symmetric key. Uses {EncryptionAlgorithm.EciesSecp256k1} if not given.
+   */
+  algorithm?: EncryptionAlgorithm;
 };
 
 export type CreateFromOptions = {
@@ -41,13 +99,11 @@ export type CreateFromOptions = {
   datePublished?: string;
   authorizationSignatureInput: SignatureInput;
   attestationSignatureInputs?: SignatureInput[];
+  encryptionInput?: EncryptionInput;
 };
 
-export class RecordsWrite extends Message {
-  /**
-   * RecordsWrite message adhering to the DWN specification.
-   */
-  readonly message: RecordsWriteMessage;
+export class RecordsWrite extends Message<RecordsWriteMessage> {
+
   readonly attesters: string[];
 
   private constructor(message: RecordsWriteMessage) {
@@ -60,7 +116,7 @@ export class RecordsWrite extends Message {
 
   public static async parse(message: RecordsWriteMessage): Promise<RecordsWrite> {
     // asynchronous checks that are required by the constructor to initialize members properly
-    await validateAuthorizationIntegrity(message, { allowedProperties: new Set(['recordId', 'contextId', 'attestationCid']) });
+    await validateAuthorizationIntegrity(message, { allowedProperties: new Set(['recordId', 'contextId', 'attestationCid', 'encryptionCid']) });
     await RecordsWrite.validateAttestationIntegrity(message);
 
     const recordsWrite = new RecordsWrite(message);
@@ -73,8 +129,10 @@ export class RecordsWrite extends Message {
   /**
    * Creates a RecordsWrite message.
    * @param options.recordId If `undefined`, will be auto-filled as a originating message as convenience for developer.
-   * @param options.data Readable stream of the data to be stored. Must specify `option.dataCid` if `undefined`.
-   * @param options.dataCid CID of the data that is already stored in the DWN. Must specify `option.data` if `undefined`.
+   * @param options.data Data used to compute the `dataCid`, must be the encrypted data bytes if `options.encryptionInput` is given.
+   *                     Must specify `options.dataCid` if `undefined`.
+   * @param options.dataCid CID of the data that is already stored in the DWN. Must specify `options.data` if `undefined`.
+   * @param options.dataSize Size of data in number of bytes. Must be defined if `options.dataCid` is defined; must be `undefined` otherwise.
    * @param options.dateCreated If `undefined`, it will be auto-filled with current time.
    * @param options.dateModified If `undefined`, it will be auto-filled with current time.
    */
@@ -82,19 +140,27 @@ export class RecordsWrite extends Message {
     const currentTime = getCurrentTimeInHighPrecision();
 
     if ((options.data === undefined && options.dataCid === undefined) ||
-         options.data !== undefined && options.dataCid !== undefined) {
+        (options.data !== undefined && options.dataCid !== undefined)) {
       throw new Error('one and only one parameter between `data` and `dataCid` is allowed');
     }
-    const dataCid = options.dataCid ?? await computeDagPbCid(options.data);
+
+    if ((options.dataCid === undefined && options.dataSize !== undefined) ||
+        (options.dataCid !== undefined && options.dataSize === undefined)) {
+      throw new Error('`dataCid` and `dataSize` must both be defined or undefined at the same time');
+    }
+
+    const dataCid = options.dataCid ?? await Cid.computeDagPbCidFromBytes(options.data!);
+    const dataSize = options.dataSize ?? options.data!.length;
 
     const descriptor: RecordsWriteDescriptor = {
       interface     : DwnInterfaceName.Records,
       method        : DwnMethodName.Write,
       protocol      : options.protocol,
-      recipient     : options.recipient,
+      recipient     : options.recipient!,
       schema        : options.schema,
       parentId      : options.parentId,
       dataCid,
+      dataSize,
       dateCreated   : options.dateCreated ?? currentTime,
       dateModified  : options.dateModified ?? currentTime,
       published     : options.published,
@@ -131,6 +197,7 @@ export class RecordsWrite extends Message {
     // `attestation` generation
     const descriptorCid = await computeCid(descriptor);
     const attestation = await RecordsWrite.createAttestation(descriptorCid, options.attestationSignatureInputs);
+    const encryption = await RecordsWrite.createEncryptionProperty(options.encryptionInput, descriptor, contextId);
 
     // `authorization` generation
     const authorization = await RecordsWrite.createAuthorization(
@@ -138,6 +205,7 @@ export class RecordsWrite extends Message {
       contextId,
       descriptorCid,
       attestation,
+      encryption,
       options.authorizationSignatureInput
     );
 
@@ -149,6 +217,7 @@ export class RecordsWrite extends Message {
 
     if (contextId !== undefined) { message.contextId = contextId; } // assign `contextId` only if it is defined
     if (attestation !== undefined) { message.attestation = attestation; } // assign `attestation` only if it is defined
+    if (encryption !== undefined) { message.encryption = encryption; } // assign `encryption` only if it is defined
 
     Message.validateJsonSchema(message);
 
@@ -177,7 +246,7 @@ export class RecordsWrite extends Message {
     // inherit published value from parent if neither published nor datePublished is specified
     const published = options.published ?? (options.datePublished ? true : unsignedMessage.descriptor.published);
     // use current time if published but no explicit time given
-    let datePublished = undefined;
+    let datePublished: string | undefined = undefined;
     // if given explicitly published dated
     if (options.datePublished) {
       datePublished = options.datePublished;
@@ -209,7 +278,8 @@ export class RecordsWrite extends Message {
       published,
       datePublished,
       data                        : options.data,
-      dataCid                     : options.data ? undefined : unsignedMessage.descriptor.dataCid, // if data not given, use dataCid from base message
+      dataCid                     : options.data ? undefined : unsignedMessage.descriptor.dataCid, // if data not given, use base message dataCid
+      dataSize                    : options.data ? undefined : unsignedMessage.descriptor.dataSize, // if data not given, use base message dataSize
       // finally still need input for signing
       authorizationSignatureInput : options.authorizationSignatureInput,
       attestationSignatureInputs  : options.attestationSignatureInputs
@@ -221,7 +291,8 @@ export class RecordsWrite extends Message {
 
   public async authorize(tenant: string, messageStore: MessageStore): Promise<void> {
     if (this.message.descriptor.protocol !== undefined) {
-      await ProtocolAuthorization.authorize(tenant, this, this.author, messageStore);
+      // NOTE: `author` definitely exists because of the earlier `authenticate()` call
+      await ProtocolAuthorization.authorize(tenant, this, this.author!, messageStore);
     } else {
       await authorize(tenant, this);
     }
@@ -268,12 +339,24 @@ export class RecordsWrite extends Message {
     }
 
     // if `attestation` is given in message, make sure the correct `attestationCid` is in the `authorization`
-    if (this.message.attestation !== undefined) {
+    if (this.authorizationPayload.attestationCid !== undefined) {
       const expectedAttestationCid = await computeCid(this.message.attestation);
       const actualAttestationCid = this.authorizationPayload.attestationCid;
       if (actualAttestationCid !== expectedAttestationCid) {
         throw new Error(
           `CID ${expectedAttestationCid} of attestation property in message does not match attestationCid in authorization: ${actualAttestationCid}`
+        );
+      }
+    }
+
+    // if `encryption` is given in message, make sure the correct `encryptionCid` is in the `authorization`
+    if (this.authorizationPayload.encryptionCid !== undefined) {
+      const expectedEncryptionCid = await computeCid(this.message.encryption);
+      const actualEncryptionCid = this.authorizationPayload.encryptionCid;
+      if (actualEncryptionCid !== expectedEncryptionCid) {
+        throw new DwnError(
+          DwnErrorCode.RecordsWriteValidateIntegrityEncryptionCidMismatch,
+          `CID ${expectedEncryptionCid} of encryption property in message does not match encryptionCid in authorization: ${actualEncryptionCid}`
         );
       }
     }
@@ -320,7 +403,12 @@ export class RecordsWrite extends Message {
   /**
    * Computes the deterministic Entry ID of this message.
    */
-  public static async getEntryId(author: string, descriptor: RecordsWriteDescriptor): Promise<string> {
+  public static async getEntryId(author: string | undefined, descriptor: RecordsWriteDescriptor): Promise<string> {
+    // TODO: this paves the way to allow unsigned RecordsWrite as suggested in #206 (https://github.com/TBD54566975/dwn-sdk-js/issues/206)
+    if (author === undefined) {
+      throw new DwnError(DwnErrorCode.RecordsWriteGetEntryIdUndefinedAuthor, 'Property `author` is needed to compute entry ID.');
+    }
+
     const entryIdInput = { ...descriptor };
     (entryIdInput as any).author = author;
 
@@ -353,6 +441,55 @@ export class RecordsWrite extends Message {
   }
 
   /**
+   * Creates the `encryption` property if encryption input is given. Else `undefined` is returned.
+   */
+  private static async createEncryptionProperty(
+    encryptionInput: EncryptionInput | undefined,
+    descriptor: RecordsWriteDescriptor,
+    contextId: string | undefined // there is opportunity here to streamline the arguments, e.g. `contextId` feels very specialized
+  ): Promise<EncryptionProperty | undefined> {
+    if (encryptionInput === undefined) {
+      return undefined;
+    }
+
+    // encrypt the data encryption key once per key derivation scheme
+    const keyEncryption: EncryptedKey[] = [];
+    for (const keyEncryptionInput of encryptionInput.keyEncryptionInputs) {
+      // NOTE: right now only `protocol-context` scheme is supported so we will assume that's the scheme without additional switch/if statements
+      // derive the leaf public key
+      const leafDerivationPath = [KeyDerivationScheme.ProtocolContext, descriptor.protocol!, contextId!];
+
+      // NOTE: right now only `ECIES-ES256K` algorithm is supported for asymmetric encryption,
+      // so we will assume that's the algorithm without additional switch/if statements
+      const leafPublicKey = await Records.deriveLeafPublicKey(keyEncryptionInput.publicKey, leafDerivationPath);
+      const keyEncryptionOutput = await Encryption.eciesSecp256k1Encrypt(leafPublicKey, encryptionInput.key);
+
+      const encryptedKey = Encoder.bytesToBase64Url(keyEncryptionOutput.ciphertext);
+      const ephemeralPublicKey = await Secp256k1.publicKeyToJwk(keyEncryptionOutput.ephemeralPublicKey);
+      const keyEncryptionInitializationVector = Encoder.bytesToBase64Url(keyEncryptionOutput.initializationVector);
+      const messageAuthenticationCode = Encoder.bytesToBase64Url(keyEncryptionOutput.messageAuthenticationCode);
+      const encryptedKeyData: EncryptedKey = {
+        algorithm            : keyEncryptionInput.algorithm ?? EncryptionAlgorithm.EciesSecp256k1,
+        derivationScheme     : keyEncryptionInput.publicKey.derivationScheme,
+        encryptedKey,
+        ephemeralPublicKey,
+        initializationVector : keyEncryptionInitializationVector,
+        messageAuthenticationCode
+      };
+
+      keyEncryption.push(encryptedKeyData);
+    }
+
+    const encryption: EncryptionProperty = {
+      algorithm            : encryptionInput.algorithm ?? EncryptionAlgorithm.Aes256Ctr,
+      initializationVector : Encoder.bytesToBase64Url(encryptionInput.initializationVector),
+      keyEncryption
+    };
+
+    return encryption;
+  }
+
+  /**
    * Creates the `attestation` property of a RecordsWrite message if given signature inputs; returns `undefined` otherwise.
    */
   private static async createAttestation(descriptorCid: string, signatureInputs?: SignatureInput[]): Promise<GeneralJws | undefined> {
@@ -375,6 +512,7 @@ export class RecordsWrite extends Message {
     contextId: string | undefined,
     descriptorCid: string,
     attestation: GeneralJws | undefined,
+    encryption: EncryptionProperty | undefined,
     signatureInput: SignatureInput
   ): Promise<GeneralJws> {
     const authorizationPayload: RecordsWriteAuthorizationPayload = {
@@ -383,9 +521,11 @@ export class RecordsWrite extends Message {
     };
 
     const attestationCid = attestation ? await computeCid(attestation) : undefined;
+    const encryptionCid = encryption ? await computeCid(encryption) : undefined;
 
     if (contextId !== undefined) { authorizationPayload.contextId = contextId; } // assign `contextId` only if it is defined
     if (attestationCid !== undefined) { authorizationPayload.attestationCid = attestationCid; } // assign `attestationCid` only if it is defined
+    if (encryptionCid !== undefined) { authorizationPayload.encryptionCid = encryptionCid; } // assign `encryptionCid` only if it is defined
 
     const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
 
@@ -396,14 +536,14 @@ export class RecordsWrite extends Message {
   /**
    * Gets the initial write from the given list or record write.
    */
-  public static getInitialWrite(messages: BaseMessage[]): RecordsWriteMessage{
+  public static async getInitialWrite(messages: BaseMessage[]): Promise<RecordsWriteMessage>{
     for (const message of messages) {
-      if (RecordsWrite.isInitialWrite(message)) {
+      if (await RecordsWrite.isInitialWrite(message)) {
         return message as RecordsWriteMessage;
       }
     }
 
-    throw new Error(`initial write is not found `);
+    throw new Error(`initial write is not found`);
   }
 
   /**
@@ -411,10 +551,10 @@ export class RecordsWrite extends Message {
    * @throws {Error} if immutable properties between two RecordsWrite message
    */
   public static verifyEqualityOfImmutableProperties(existingWriteMessage: RecordsWriteMessage, newMessage: RecordsWriteMessage): boolean {
-    const mutableDescriptorProperties = ['dataCid', 'datePublished', 'published', 'dateModified'];
+    const mutableDescriptorProperties = ['dataCid', 'dataSize', 'datePublished', 'published', 'dateModified'];
 
     // get distinct property names that exist in either the existing message given or new message
-    let descriptorPropertyNames = [];
+    let descriptorPropertyNames: string[] = [];
     descriptorPropertyNames.push(...Object.keys(existingWriteMessage.descriptor));
     descriptorPropertyNames.push(...Object.keys(newMessage.descriptor));
     descriptorPropertyNames = [...new Set(descriptorPropertyNames)]; // step to remove duplicates
@@ -423,8 +563,8 @@ export class RecordsWrite extends Message {
     for (const descriptorPropertyName of descriptorPropertyNames) {
       // if property is supposed to be immutable
       if (mutableDescriptorProperties.indexOf(descriptorPropertyName) === -1) {
-        const valueInExistingWrite = existingWriteMessage.descriptor[descriptorPropertyName];
-        const valueInNewMessage = newMessage.descriptor[descriptorPropertyName];
+        const valueInExistingWrite = (existingWriteMessage.descriptor as any)[descriptorPropertyName];
+        const valueInNewMessage = (newMessage.descriptor as any)[descriptorPropertyName];
         if (valueInNewMessage !== valueInExistingWrite) {
           throw new Error(`${descriptorPropertyName} is an immutable property: cannot change '${valueInExistingWrite}' to '${valueInNewMessage}'`);
         }

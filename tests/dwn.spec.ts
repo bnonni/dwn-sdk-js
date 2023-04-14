@@ -1,3 +1,5 @@
+import type { TenantGate } from '../src/index.js';
+
 import chaiAsPromised from 'chai-as-promised';
 import sinon from 'sinon';
 import chai, { expect } from 'chai';
@@ -5,9 +7,9 @@ import chai, { expect } from 'chai';
 import { DataStoreLevel } from '../src/store/data-store-level.js';
 import { DidKeyResolver } from '../src/did/did-key-resolver.js';
 import { Dwn } from '../src/dwn.js';
+import { EventLogLevel } from '../src/event-log/event-log-level.js';
 import { Message } from '../src/core/message.js';
 import { MessageStoreLevel } from '../src/store/message-store-level.js';
-import { TenantGate } from '../src/index.js';
 import { TestDataGenerator } from './utils/test-data-generator.js';
 
 chai.use(chaiAsPromised);
@@ -15,19 +17,26 @@ chai.use(chaiAsPromised);
 describe('DWN', () => {
   let messageStore: MessageStoreLevel;
   let dataStore: DataStoreLevel;
+  let eventLog: EventLogLevel;
   let dwn: Dwn;
 
   before(async () => {
     // important to follow this pattern to initialize the message store in tests
     // so that different suites can reuse the same block store and index location for testing
     messageStore = new MessageStoreLevel({
-      blockstoreLocation : 'TEST-BLOCKSTORE',
+      blockstoreLocation : 'TEST-MESSAGESTORE',
       indexLocation      : 'TEST-INDEX'
     });
 
-    dataStore = new DataStoreLevel('TEST-DATASTORE');
+    dataStore = new DataStoreLevel({
+      blockstoreLocation: 'TEST-DATASTORE'
+    });
 
-    dwn = await Dwn.create({ messageStore, dataStore });
+    eventLog = new EventLogLevel({
+      location: 'TEST-EVENTLOG'
+    });
+
+    dwn = await Dwn.create({ messageStore, dataStore, eventLog });
   });
 
   beforeEach(async () => {
@@ -122,8 +131,15 @@ describe('DWN', () => {
 
       const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
       const dataStoreStub = sinon.createStubInstance(DataStoreLevel);
+      const eventLogStub = sinon.createStubInstance(EventLogLevel);
 
-      const dwnWithConfig = await Dwn.create({ tenantGate: blockAllTenantGate, messageStore: messageStoreStub, dataStore: dataStoreStub });
+      const dwnWithConfig = await Dwn.create({
+        tenantGate   : blockAllTenantGate,
+        messageStore : messageStoreStub,
+        dataStore    : dataStoreStub,
+        eventLog     : eventLogStub
+      });
+
       const alice = await DidKeyResolver.generate();
       const { requester, message } = await TestDataGenerator.generateRecordsQuery({ requester: alice });
 

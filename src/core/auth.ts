@@ -1,12 +1,13 @@
 import type { BaseMessage } from './types.js';
+import type { CID } from 'multiformats';
+import type { DidResolver } from '../did/did-resolver.js';
+import type { GeneralJws } from '../jose/jws/general/types.js';
+import type { Message } from './message.js';
 
-import { CID } from 'multiformats';
-import { DidResolver } from '../did/did-resolver.js';
-import { GeneralJws } from '../jose/jws/general/types.js';
 import { GeneralJwsVerifier } from '../jose/jws/general/verifier.js';
 import { Jws } from '../utils/jws.js';
-import { Message } from './message.js';
 import { computeCid, parseCid } from '../utils/cid.js';
+import { DwnError, DwnErrorCode } from './dwn-error.js';
 
 type AuthorizationPayloadConstraints = {
   /** permissible properties within payload. Note that `descriptorCid` is implied and does not need to be added */
@@ -21,7 +22,7 @@ type AuthorizationPayloadConstraints = {
  */
 export async function canonicalAuth(
   tenant: string,
-  incomingMessage: Message,
+  incomingMessage: Message<BaseMessage>,
   didResolver: DidResolver
 ): Promise<void> {
   await authenticate(incomingMessage.message.authorization, didResolver);
@@ -31,11 +32,15 @@ export async function canonicalAuth(
 /**
  * Validates the structural integrity of the `authorization` property.
  * NOTE: signature is not verified.
+ * @returns the parsed JSON payload object if validation succeeds.
  */
 export async function validateAuthorizationIntegrity(
   message: BaseMessage,
   authorizationPayloadConstraints?: AuthorizationPayloadConstraints
 ): Promise<{ descriptorCid: CID, [key: string]: any }> {
+  if (message.authorization === undefined) {
+    throw new DwnError(DwnErrorCode.AuthorizationMissing, 'Property `authorization` is missing.');
+  }
 
   if (message.authorization.signatures.length !== 1) {
     throw new Error('expected no more than 1 signature for authorization');
@@ -75,7 +80,11 @@ export async function validateAuthorizationIntegrity(
  * Validates the signature(s) of the given JWS.
  * @throws {Error} if fails authentication
  */
-export async function authenticate(jws: GeneralJws, didResolver: DidResolver): Promise<void> {
+export async function authenticate(jws: GeneralJws | undefined, didResolver: DidResolver): Promise<void> {
+  if (jws === undefined) {
+    throw new DwnError(DwnErrorCode.AuthenticateJwsMissing, 'Missing JWS.');
+  }
+
   const verifier = new GeneralJwsVerifier(jws);
   await verifier.verify(didResolver);
 }
@@ -84,7 +93,7 @@ export async function authenticate(jws: GeneralJws, didResolver: DidResolver): P
  * Authorizes the incoming message.
  * @throws {Error} if fails authentication
  */
-export async function authorize(tenant: string, incomingMessage: Message): Promise<void> {
+export async function authorize(tenant: string, incomingMessage: Message<BaseMessage>): Promise<void> {
   // if author/requester is the same as the target tenant, we can directly grant access
   if (incomingMessage.author === tenant) {
     return;

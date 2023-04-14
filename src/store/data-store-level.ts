@@ -1,19 +1,45 @@
+import type { ImportResult } from 'ipfs-unixfs-importer';
+import type { AssociateResult, DataStore, GetResult, PutResult } from './data-store.js';
+
 import { BlockstoreLevel } from './blockstore-level.js';
-import { CID } from 'multiformats/cid';
-import { DataStore } from './data-store.js';
+import { createLevelDatabase } from './level-wrapper.js';
 import { exporter } from 'ipfs-unixfs-exporter';
 import { importer } from 'ipfs-unixfs-importer';
 import { Readable } from 'readable-stream';
 
+const DATA_PARTITION = 'data';
+const HOST_PARTITION = 'host';
+
+// `BlockstoreLevel` doesn't support being a `Set` (i.e. it always requires a value), so use a placeholder instead.
+const PLACEHOLDER_VALUE = new Uint8Array();
+
 /**
- * A simple implementation of {@link MessageStore} that works in both the browser and server-side.
+ * A simple implementation of {@link DataStore} that works in both the browser and server-side.
  * Leverages LevelDB under the hood.
+ *
+ * It has the following structure (`+` represents a sublevel and `->` represents a key->value pair):
+ *   'data' + <dataCid> -> <data>
+ *   'host' + <dataCid> + <tenant> + <messageCid> -> PLACEHOLDER_VALUE
+ *
+ * This allows for the <data> to be shared for everything that uses the same <dataCid> while also making
+ * sure that the <data> can only be deleted if there are no <messageCid> for any <tenant> still using it.
  */
 export class DataStoreLevel implements DataStore {
+  config: DataStoreLevelConfig;
+
   blockstore: BlockstoreLevel;
 
-  constructor(blockstoreLocation: string = 'DATASTORE') {
-    this.blockstore = new BlockstoreLevel(blockstoreLocation);
+  constructor(config: DataStoreLevelConfig = {}) {
+    this.config = {
+      blockstoreLocation: 'DATASTORE',
+      createLevelDatabase,
+      ...config
+    };
+
+    this.blockstore = new BlockstoreLevel({
+      location            : this.config.blockstoreLocation!,
+      createLevelDatabase : this.config.createLevelDatabase,
+    });
   }
 
   public async open(): Promise<void> {
@@ -24,52 +50,119 @@ export class DataStoreLevel implements DataStore {
     await this.blockstore.close();
   }
 
-  async put(tenant: string, recordId: string, dataStream: Readable): Promise<string> {
-    const asyncDataBlocks = importer([{ content: dataStream }], this.blockstore, { cidVersion: 1 });
+  async put(tenant: string, messageCid: string, dataCid: string, dataStream: Readable): Promise<PutResult> {
+    const tenantsForData = await this.blockstore.partition(HOST_PARTITION);
+    const messagesForTenant = await tenantsForData.partition(dataCid);
+    const messages = await messagesForTenant.partition(tenant);
 
-    // NOTE: the last block contains the root CID
-    let block;
-    for await (block of asyncDataBlocks) { ; }
+    await messages.put(messageCid, PLACEHOLDER_VALUE);
 
-    // MUST verify that the CID of the actual data matches with the given `dataCid`
-    // if data CID is wrong, delete the data we just stored
-    const dataCid = block.cid.toString();
-    return dataCid;
+    const blocksForData = await this.blockstore.partition(DATA_PARTITION);
+    const blocks = await blocksForData.partition(dataCid);
+
+    const asyncDataBlocks = importer([{ content: dataStream }], blocks, { cidVersion: 1 });
+
+    // NOTE: the last block contains the root CID as well as info to derive the data size
+    let dataDagRoot: ImportResult | undefined = undefined;
+    for await (dataDagRoot of asyncDataBlocks) { ; }
+
+    if (dataDagRoot == undefined) { return { dataCid, dataSize: 0 }; } // FIXME: Is this a valid empty PutResult?
+
+    return {
+      dataCid  : String(dataDagRoot.cid),
+      dataSize : Number(dataDagRoot.unixfs?.fileSize() ?? dataDagRoot.size)
+    };
   }
 
-  public async get(tenant: string, recordId: string, dataCid: string): Promise<Uint8Array | undefined> {
-    const cid = CID.parse(dataCid);
-    const bytes = await this.blockstore.get(cid);
+  public async get(tenant: string, messageCid: string, dataCid: string): Promise<GetResult | undefined> {
+    const tenantsForData = await this.blockstore.partition(HOST_PARTITION);
+    const messagesForTenant = await tenantsForData.partition(dataCid);
+    const messages = await messagesForTenant.partition(tenant);
 
-    if (!bytes) {
+    const allowed = await messages.has(messageCid);
+    if (!allowed) {
+      return undefined;
+    }
+
+    const blocksForData = await this.blockstore.partition(DATA_PARTITION);
+    const blocks = await blocksForData.partition(dataCid);
+
+    const exists = await blocks.has(dataCid);
+    if (!exists) {
       return undefined;
     }
 
     // data is chunked into dag-pb unixfs blocks. re-inflate the chunks.
-    const dataDagRoot = await exporter(dataCid, this.blockstore);
-    const dataBytes = new Uint8Array(dataDagRoot.size);
-    let offset = 0;
+    const dataDagRoot = await exporter(dataCid, blocks);
+    const contentIterator = dataDagRoot.content()[Symbol.asyncIterator]();
 
-    for await (const chunk of dataDagRoot.content()) {
-      dataBytes.set(chunk, offset);
-      offset += chunk.length;
+    const dataStream = new Readable({
+      async read(): Promise<void> {
+        const result = await contentIterator.next();
+        if (result.done) {
+          this.push(null); // end the stream
+        } else {
+          this.push(result.value);
+        }
+      }
+    });
+
+    return {
+      dataCid  : String(dataDagRoot.cid),
+      dataSize : Number(dataDagRoot.unixfs?.fileSize() ?? dataDagRoot.size),
+      dataStream,
+    };
+  }
+
+  public async associate(tenant: string, messageCid: string, dataCid: string): Promise<AssociateResult | undefined> {
+    const tenantsForData = await this.blockstore.partition(HOST_PARTITION);
+    const messagesForTenant = await tenantsForData.partition(dataCid);
+    const messages = await messagesForTenant.partition(tenant);
+
+    const isFirstMessage = await messages.isEmpty();
+    if (isFirstMessage) {
+      return undefined;
     }
 
-    return dataBytes;
+    const blocksForData = await this.blockstore.partition(DATA_PARTITION);
+    const blocks = await blocksForData.partition(dataCid);
+
+    const exists = await blocks.has(dataCid);
+    if (!exists) {
+      return undefined;
+    }
+
+    await messages.put(messageCid, PLACEHOLDER_VALUE);
+
+    const dataDagRoot = await exporter(dataCid, blocks);
+
+    return {
+      dataCid  : String(dataDagRoot.cid),
+      dataSize : Number(dataDagRoot.unixfs?.fileSize() ?? dataDagRoot.size)
+    };
   }
 
-  public async has(tenant: string, recordId: string, dataCid: string): Promise<boolean> {
-    const cid = CID.parse(dataCid);
-    const rootBlockBytes = await this.blockstore.get(cid);
+  public async delete(tenant: string, messageCid: string, dataCid: string): Promise<void> {
+    const tenantsForData = await this.blockstore.partition(HOST_PARTITION);
+    const messagesForTenant = await tenantsForData.partition(dataCid);
+    const messages = await messagesForTenant.partition(tenant);
 
-    return (rootBlockBytes !== undefined);
-  }
+    await messages.delete(messageCid);
 
-  public async delete(tenant: string, recordId: string, dataCid: string): Promise<void> {
-    // TODO: Implement data deletion in Records - https://github.com/TBD54566975/dwn-sdk-js/issues/84
-    const cid = CID.parse(dataCid);
-    await this.blockstore.delete(cid);
-    return;
+    const wasLastMessage = await messages.isEmpty();
+    if (!wasLastMessage) {
+      return;
+    }
+
+    const wasLastTenant = await messagesForTenant.isEmpty();
+    if (!wasLastTenant) {
+      return;
+    }
+
+    const blocksForData = await this.blockstore.partition(DATA_PARTITION);
+    const blocks = await blocksForData.partition(dataCid);
+
+    await blocks.clear();
   }
 
   /**
@@ -78,4 +171,15 @@ export class DataStoreLevel implements DataStore {
   public async clear(): Promise<void> {
     await this.blockstore.clear();
   }
+
+  async dump() : Promise<void> {
+    console.group('blockstore');
+    await this.blockstore['dump']?.();
+    console.groupEnd();
+  }
 }
+
+type DataStoreLevelConfig = {
+  blockstoreLocation?: string,
+  createLevelDatabase?: typeof createLevelDatabase,
+};

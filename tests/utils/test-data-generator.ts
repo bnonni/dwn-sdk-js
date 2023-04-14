@@ -1,41 +1,45 @@
-import * as cbor from '@ipld/dag-cbor';
-import { BaseMessage } from '../../src/core/types.js';
-import { CID } from 'multiformats/cid';
-import { CreateFromOptions } from '../../src/interfaces/records/messages/records-write.js';
-import { DataStream } from '../../src/utils/data-stream.js';
-import { DidResolutionResult } from '../../src/did/did-resolver.js';
-import { ed25519 } from '../../src/jose/algorithms/signing/ed25519.js';
-import { getCurrentTimeInHighPrecision } from '../../src/utils/time.js';
-import { PermissionsRequest } from '../../src/interfaces/permissions/messages/permissions-request.js';
-import { Readable } from 'readable-stream';
-import { RecordsQueryFilter } from '../../src/interfaces/records/types.js';
-import { removeUndefinedProperties } from '../../src/utils/object.js';
-import { secp256k1 } from '../../src/jose/algorithms/signing/secp256k1.js';
-import { sha256 } from 'multiformats/hashes/sha2';
-import {
+import type { BaseMessage } from '../../src/core/types.js';
+import type { DidResolutionResult } from '../../src/did/did-resolver.js';
+import type { Readable } from 'readable-stream';
+import type { RecordsQueryFilter } from '../../src/interfaces/records/types.js';
+import type { CreateFromOptions, EncryptionInput } from '../../src/interfaces/records/messages/records-write.js';
+import type {
   DateSort,
-  DidKeyResolver,
-  HooksWrite,
   HooksWriteMessage,
   HooksWriteOptions,
-  Jws,
   ProtocolDefinition,
-  ProtocolsConfigure,
   ProtocolsConfigureMessage,
   ProtocolsConfigureOptions,
-  ProtocolsQuery,
   ProtocolsQueryMessage,
   ProtocolsQueryOptions,
-  RecordsDelete,
   RecordsDeleteMessage,
-  RecordsQuery,
   RecordsQueryMessage,
   RecordsQueryOptions,
-  RecordsWrite,
   RecordsWriteMessage,
   RecordsWriteOptions
 } from '../../src/index.js';
-import { PrivateJwk, PublicJwk } from '../../src/jose/types.js';
+import type { PrivateJwk, PublicJwk } from '../../src/jose/types.js';
+
+import * as cbor from '@ipld/dag-cbor';
+import { CID } from 'multiformats/cid';
+import { DataStream } from '../../src/utils/data-stream.js';
+import { ed25519 } from '../../src/jose/algorithms/signing/ed25519.js';
+import { getCurrentTimeInHighPrecision } from '../../src/utils/time.js';
+import { PermissionsRequest } from '../../src/interfaces/permissions/messages/permissions-request.js';
+import { removeUndefinedProperties } from '../../src/utils/object.js';
+import { Secp256k1 } from '../../src/utils/secp256k1.js';
+import { sha256 } from 'multiformats/hashes/sha2';
+
+import {
+  DidKeyResolver,
+  HooksWrite,
+  Jws,
+  ProtocolsConfigure,
+  ProtocolsQuery,
+  RecordsDelete,
+  RecordsQuery,
+  RecordsWrite
+} from '../../src/index.js';
 
 /**
  * A logical grouping of user data used to generate test messages.
@@ -56,7 +60,7 @@ export type GenerateProtocolsConfigureInput = {
 export type GenerateProtocolsConfigureOutput = {
   requester: Persona;
   message: ProtocolsConfigureMessage;
-  dataStream: Readable;
+  dataStream?: Readable;
   protocolsConfigure: ProtocolsConfigure;
 };
 
@@ -85,10 +89,13 @@ export type GenerateRecordsWriteInput = {
   parentId?: string;
   published?: boolean;
   data?: Uint8Array;
+  dataCid?: string;
+  dataSize?: number;
   dataFormat?: string;
   dateCreated?: string;
   dateModified?: string;
   datePublished?: string;
+  encryptionInput?: EncryptionInput;
 };
 
 export type GenerateFromRecordsWriteInput = {
@@ -110,8 +117,10 @@ export type GenerateFromRecordsWriteOut = {
 export type GenerateRecordsWriteOutput = {
   requester: Persona;
   message: RecordsWriteMessage;
-  dataBytes: Uint8Array;
-  dataStream: Readable;
+  dataCid?: string;
+  dataSize?: number;
+  dataBytes?: Uint8Array;
+  dataStream?: Readable;
   recordsWrite: RecordsWrite;
 };
 
@@ -125,6 +134,11 @@ export type GenerateRecordsQueryInput = {
 export type GenerateRecordsQueryOutput = {
   requester: Persona;
   message: RecordsQueryMessage;
+};
+
+export type GenerateRecordsDeleteInput = {
+  requester?: Persona;
+  recordId?: string;
 };
 
 export type GenerateRecordsDeleteOutput = {
@@ -167,7 +181,7 @@ export class TestDataGenerator {
     const keyId = input?.keyId ?? `${did}#${keyIdSuffix}`;
 
     // generate requester key pair if not given
-    const keyPair = input?.keyPair ?? await secp256k1.generateKeyPair();
+    const keyPair = input?.keyPair ?? await Secp256k1.generateKeyPair();
 
     const persona: Persona = {
       did,
@@ -254,7 +268,7 @@ export class TestDataGenerator {
    * Generates a RecordsWrite message for testing.
    * Implementation currently uses `RecordsWrite.create()`.
    * @param input.attesters Attesters of the message. Will NOT be generated if not given.
-   * @param input.data Data that belongs to the record. Generated if not given.
+   * @param input.data Data that belongs to the record. Generated when not given only if `dataCid` and `dataSize` are also not given.
    * @param input.dataFormat Format of the data. Defaults to 'application/json' if not given.
    * @param input.requester Author of the message. Generated if not given.
    * @param input.schema Schema of the message. Randomly generated if not given.
@@ -265,26 +279,34 @@ export class TestDataGenerator {
     const authorizationSignatureInput = Jws.createSignatureInput(requester);
     const attestationSignatureInputs = Jws.createSignatureInputs(input?.attesters ?? []);
 
-    const dataBytes = input?.data ?? TestDataGenerator.randomBytes(32);
-    const dataStream = DataStream.fromBytes(dataBytes);
+    const dataCid = input?.dataCid;
+    const dataSize = input?.dataSize;
+    let dataBytes;
+    let dataStream;
+    if (dataCid === undefined && dataSize === undefined) {
+      dataBytes = input?.data ?? TestDataGenerator.randomBytes(32);
+      dataStream = DataStream.fromBytes(dataBytes);
+    }
 
     const options: RecordsWriteOptions = {
-      recipient     : input?.recipientDid,
-      protocol      : input?.protocol,
-      contextId     : input?.contextId,
-      schema        : input?.schema ?? TestDataGenerator.randomString(20),
-      recordId      : input?.recordId,
-      parentId      : input?.parentId,
-      published     : input?.published,
-      dataFormat    : input?.dataFormat ?? 'application/json',
-      dateCreated   : input?.dateCreated,
-      dateModified  : input?.dateModified,
-      datePublished : input?.datePublished,
-      data          : dataBytes,
+      recipient       : input?.recipientDid,
+      protocol        : input?.protocol,
+      contextId       : input?.contextId,
+      schema          : input?.schema ?? TestDataGenerator.randomString(20),
+      recordId        : input?.recordId,
+      parentId        : input?.parentId,
+      published       : input?.published,
+      dataFormat      : input?.dataFormat ?? 'application/json',
+      dateCreated     : input?.dateCreated,
+      dateModified    : input?.dateModified,
+      datePublished   : input?.datePublished,
+      data            : dataBytes,
+      dataCid,
+      dataSize,
       authorizationSignatureInput,
-      attestationSignatureInputs
+      attestationSignatureInputs,
+      encryptionInput : input?.encryptionInput
     };
-
 
     const recordsWrite = await RecordsWrite.create(options);
     const message = recordsWrite.message as RecordsWriteMessage;
@@ -292,6 +314,8 @@ export class TestDataGenerator {
     return {
       requester,
       message,
+      dataCid,
+      dataSize,
       dataBytes,
       dataStream,
       recordsWrite
@@ -303,7 +327,7 @@ export class TestDataGenerator {
    * Any mutable property is not specified will be automatically mutated.
    * e.g. if `published` is not specified, it will be toggled from the state of the given existing write.
    */
-  public static async generateFromRecordsWrite(input?: GenerateFromRecordsWriteInput): Promise<GenerateFromRecordsWriteOut> {
+  public static async generateFromRecordsWrite(input: GenerateFromRecordsWriteInput): Promise<GenerateFromRecordsWriteOut> {
     const existingMessage = input.existingWrite.message;
     const currentTime = getCurrentTimeInHighPrecision();
 
@@ -359,11 +383,11 @@ export class TestDataGenerator {
   /**
    * Generates a RecordsDelete for testing.
    */
-  public static async generateRecordsDelete(): Promise<GenerateRecordsDeleteOutput> {
-    const requester = await DidKeyResolver.generate();
+  public static async generateRecordsDelete(input?: GenerateRecordsDeleteInput): Promise<GenerateRecordsDeleteOutput> {
+    const requester = input?.requester ?? await DidKeyResolver.generate();
 
     const recordsDelete = await RecordsDelete.create({
-      recordId                    : await TestDataGenerator.randomCborSha256Cid(),
+      recordId                    : input?.recordId ?? await TestDataGenerator.randomCborSha256Cid(),
       authorizationSignatureInput : Jws.createSignatureInput(requester)
     });
 
@@ -433,8 +457,12 @@ export class TestDataGenerator {
    * Generates a random byte array of given length.
    */
   public static randomBytes(length: number): Uint8Array {
-    const randomString = TestDataGenerator.randomString(length);
-    return new TextEncoder().encode(randomString);
+    const randomBytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+      randomBytes[i] = Math.floor(Math.random() * 256);
+    }
+
+    return randomBytes;
   };
 
   /**

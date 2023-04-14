@@ -1,10 +1,10 @@
 import type { MethodHandler } from '../../types.js';
 import type { PermissionsRequestMessage } from '../types.js';
+import type { DataStore, DidResolver, MessageStore } from '../../../index.js';
 
 import { canonicalAuth } from '../../../core/auth.js';
 import { MessageReply } from '../../../core/message-reply.js';
 import { PermissionsRequest } from '../messages/permissions-request.js';
-import { DataStore, DidResolver, MessageStore } from '../../../index.js';
 
 export class PermissionsRequestHandler implements MethodHandler {
 
@@ -13,8 +13,8 @@ export class PermissionsRequestHandler implements MethodHandler {
   public async handle({
     tenant,
     message
-  }): Promise<MessageReply> {
-    const permissionRequest = await PermissionsRequest.parse(message as PermissionsRequestMessage);
+  }: {tenant: string, message: PermissionsRequestMessage}): Promise<MessageReply> {
+    const permissionRequest = await PermissionsRequest.parse(message);
     const { author } = permissionRequest;
 
     if (tenant !== permissionRequest.grantedBy && tenant !== permissionRequest.grantedTo) {
@@ -30,11 +30,10 @@ export class PermissionsRequestHandler implements MethodHandler {
     }
 
     const index = {
-      tenant,
       author,
       ... message.descriptor
     };
-    await this.messageStore.put(message, index);
+    await this.messageStore.put(tenant, message, index as any); // FIXME
 
     return new MessageReply({
       status: { code: 202, detail: 'Accepted' }

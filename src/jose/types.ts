@@ -19,7 +19,7 @@ export type PublicJwk = Jwk & {
   /** The "crv" (curve) parameter identifies the cryptographic curve used with the key.
    * MUST be present for all EC public keys
    */
-  crv: string;
+  crv: 'Ed25519' | 'secp256k1';
   /**
    * the x coordinate for the Elliptic Curve point.
    * Represented as the base64url encoding of the octet string representation of the coordinate.
@@ -44,12 +44,13 @@ export type PrivateJwk = PublicJwk & {
 
 export interface Signer {
   /**
- * signs the provided payload using the provided JWK
- * @param content - the content to sign
- * @param privateJwk - the key to sign with
- * @returns the signed content (aka signature)
- */
+   * signs the provided payload using the provided JWK
+   * @param content - the content to sign
+   * @param privateJwk - the key to sign with
+   * @returns the signed content (aka signature)
+   */
   sign(content: Uint8Array, privateJwk: PrivateJwk): Promise<Uint8Array>;
+
   /**
    * Verifies a signature against the provided payload hash and public key.
    * @param content - the content to verify with

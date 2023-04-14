@@ -4,6 +4,7 @@ import chai, { expect } from 'chai';
 
 import { DataStoreLevel } from '../../../../src/store/data-store-level.js';
 import { DidKeyResolver } from '../../../../src/did/did-key-resolver.js';
+import { EventLogLevel } from '../../../../src/event-log/event-log-level.js';
 import { GeneralJwsSigner } from '../../../../src/jose/jws/general/signer.js';
 import { MessageStoreLevel } from '../../../../src/store/message-store-level.js';
 import { TestDataGenerator } from '../../../utils/test-data-generator.js';
@@ -13,10 +14,11 @@ import { DidResolver, Dwn, Encoder, Jws } from '../../../../src/index.js';
 
 chai.use(chaiAsPromised);
 
-describe('handleProtocolsQuery()', () => {
+describe('ProtocolsQueryHandler.handle()', () => {
   let didResolver: DidResolver;
   let messageStore: MessageStoreLevel;
   let dataStore: DataStoreLevel;
+  let eventLog: EventLogLevel;
   let dwn: Dwn;
 
   describe('functional tests', () => {
@@ -26,13 +28,19 @@ describe('handleProtocolsQuery()', () => {
       // important to follow this pattern to initialize and clean the message and data store in tests
       // so that different suites can reuse the same block store and index location for testing
       messageStore = new MessageStoreLevel({
-        blockstoreLocation : 'TEST-BLOCKSTORE',
+        blockstoreLocation : 'TEST-MESSAGESTORE',
         indexLocation      : 'TEST-INDEX'
       });
 
-      dataStore = new DataStoreLevel('TEST-DATASTORE');
+      dataStore = new DataStoreLevel({
+        blockstoreLocation: 'TEST-DATASTORE'
+      });
 
-      dwn = await Dwn.create({ didResolver, messageStore, dataStore });
+      eventLog = new EventLogLevel({
+        location: 'TEST-EVENTLOG'
+      });
+
+      dwn = await Dwn.create({ didResolver, messageStore, dataStore, eventLog });
     });
 
     beforeEach(async () => {
@@ -41,6 +49,7 @@ describe('handleProtocolsQuery()', () => {
       // clean up before each test rather than after so that a test does not depend on other tests to do the clean up
       await messageStore.clear();
       await dataStore.clear();
+      await eventLog.clear();
     });
 
     after(async () => {

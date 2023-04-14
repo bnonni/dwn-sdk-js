@@ -16,28 +16,58 @@ export interface DataStore {
 
   /**
    * Puts the given data in store.
-   * @param logicalId This may be the ID of a record, or the ID of a protocol definition etc.
-   * @returns The CID of the data stored.
+   * It is expected that the CID of the dataStream matches the given dataCid.
+   * The returned dataCid and returned dataSize will be verified against the given dataCid (and inferred dataSize).
+   * @param messageCid CID of the message that references the data.
+   * @returns The CID and size in number of bytes of the data stored.
    */
-  put(tenant: string, logicalId: string, dataStream: Readable): Promise<string>;
+  put(tenant: string, messageCid: string, dataCid: string, dataStream: Readable): Promise<PutResult>;
 
   /**
    * Fetches the specified data.
-   * TODO: #205 - https://github.com/TBD54566975/dwn-sdk-js/issues/205
-   * change return type from Uint8Array to a readable stream
-   * @param logicalId This may be the ID of a record, or the ID of a protocol definition etc.
+   * The returned dataCid and returned dataSize will be verified against the given dataCid (and inferred dataSize).
+   * @param messageCid CID of the message that references the data.
    */
-  get(tenant: string, logicalId: string, dataCid: string): Promise<Uint8Array | undefined>;
+  get(tenant: string, messageCid: string, dataCid: string): Promise<GetResult | undefined>;
 
   /**
-   * Checks to see if the store has the specified data.
-   * @param logicalId This may be the ID of a record, or the ID of a protocol definition etc.
+   * Associates existing data.
+   * The returned dataCid and returned dataSize will be verified against the given dataCid (and inferred dataSize).
+   * @param tenant The tenant in which the data must exist under for the association to occur.
+   * @param messageCid CID of the message that references the data.
+   * @param dataCid The CID of the data stored.
+   * @returns Whether data for the given CID was found under the tenant scope in the store.
    */
-  has(tenant: string, logicalId: string, dataCid: string): Promise<boolean>;
+  associate(tenant: string, messageCid: string, dataCid: string): Promise<AssociateResult | undefined>;
 
   /**
-   * Deletes the specified data;
-   * @param logicalId This may be the ID of a record, or the ID of a protocol definition etc.
+   * Deletes the specified data.
+   * @param messageCid CID of the message that references the data.
    */
-  delete(tenant: string, logicalId: string, dataCid: string): Promise<void>;
+  delete(tenant: string, messageCid: string, dataCid: string): Promise<void>;
 }
+
+/**
+ * Result of a data store `put()` method call.
+ */
+export type PutResult = {
+  dataCid: string;
+  dataSize: number;
+};
+
+/**
+ * Result of a data store `get()` method call.
+ */
+export type GetResult = {
+  dataCid: string;
+  dataSize: number;
+  dataStream: Readable;
+};
+
+/**
+ * Result of a data store `associate()` method call.
+ */
+export type AssociateResult = {
+  dataCid: string;
+  dataSize: number;
+};

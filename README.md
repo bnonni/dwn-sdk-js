@@ -3,7 +3,7 @@
 # Decentralized Web Node (DWN) SDK
 
 Code Coverage
-![Statements](https://img.shields.io/badge/statements-94.36%25-brightgreen.svg?style=flat) ![Branches](https://img.shields.io/badge/branches-94.95%25-brightgreen.svg?style=flat) ![Functions](https://img.shields.io/badge/functions-92.3%25-brightgreen.svg?style=flat) ![Lines](https://img.shields.io/badge/lines-94.36%25-brightgreen.svg?style=flat)
+![Statements](https://img.shields.io/badge/statements-93.56%25-brightgreen.svg?style=flat) ![Branches](https://img.shields.io/badge/branches-93.09%25-brightgreen.svg?style=flat) ![Functions](https://img.shields.io/badge/functions-91.24%25-brightgreen.svg?style=flat) ![Lines](https://img.shields.io/badge/lines-93.56%25-brightgreen.svg?style=flat)
 
 ## Introduction
 
@@ -37,7 +37,7 @@ const data = randomBytes(32); // in node.js
 // const data = new Uint8Array(32);
 // window.crypto.getRandomValues(data);
 
-const query = await RecordsWrite.create({
+const recordsWrite = await RecordsWrite.create({
   data,
   dataFormat                  : 'application/json',
   published                   : true,
@@ -47,7 +47,7 @@ const query = await RecordsWrite.create({
 });
 
 const dataStream = DataStream.fromBytes(data);
-const result = await dwn.processMessage(didState.did, query.toJSON(), dataStream);
+const result = await dwn.processMessage(didKey.did, recordsWrite.message, dataStream);
 
 ```
 
@@ -65,12 +65,44 @@ With a web wallet installed:
   });
 ```  
 
+## Release/Build Process
+The DWN JS SDK releases builds to [npmjs.com](https://www.npmjs.com/package/@tbd54566975/dwn-sdk-js). There are two build types: stable build and unstable build.
+
+### Stable Build
+This is triggered manually by:
+ 1. Increment `version` in `package.json` in [Semantic Versioning (semver)](https://semver.org/) format.
+ 2. Merge the change into `main` branch
+ 3. Create a release from GitHub.
+ 
+ An official build with version matching the `package.json` will be published to [npmjs.com](https://www.npmjs.com/package/@tbd54566975/dwn-sdk-js).
+
+### Unstable Build
+Every push to the `main` branch will automatically trigger an unstable build to [npmjs.com](https://www.npmjs.com/package/@tbd54566975/dwn-sdk-js) for developers to experiment and test.
+
+The version string contains the date as well as the commit hash of the last change.
+
+An example version string:
+
+`0.0.26-unstable-2023-03-16-36ec2ce`
+
+- `0.0.26` came from `version` in `package.json`
+- `2023-03-16` indicates the date of March 16th 2023
+- `36ec2ce` is the commit hash of the last change
+
 ## Some projects that use this library: 
 
+* [Web5 JS SDK](https://github.com/TBD54566975/web5-js)
 * [Example CLI](https://github.com/TBD54566975/dwn-cli)
 * [Example with a web wallet](https://github.com/TBD54566975/incubating-web5-labs/)
 * [Server side aggregator](https://github.com/TBD54566975/dwn-server)
 
+
+
+
+## Architecture
+<img src="./images/dwn-architecture.png" alt="Architecture of DWN SDN" width="700">
+
+> NOTE: The diagram is a conceptual view of the architecture, the actual component abstraction and names in source file may differ.
 
 ## Project Resources
 

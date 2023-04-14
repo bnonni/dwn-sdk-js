@@ -1,5 +1,6 @@
 import type { SignatureInput } from '../../../jose/jws/general/types.js';
-import type { RangeCriterion, RecordsQueryDescriptor, RecordsQueryFilter, RecordsQueryMessage } from '../types.js';
+import type { Filter, RangeFilter } from '../../../core/types.js';
+import type { RecordsQueryDescriptor, RecordsQueryFilter, RecordsQueryMessage } from '../types.js';
 
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { Message } from '../../../core/message.js';
@@ -21,12 +22,7 @@ export type RecordsQueryOptions = {
   authorizationSignatureInput: SignatureInput;
 };
 
-export class RecordsQuery extends Message {
-  readonly message: RecordsQueryMessage; // a more specific type than the base type defined in parent class
-
-  private constructor(message: RecordsQueryMessage) {
-    super(message);
-  }
+export class RecordsQuery extends Message<RecordsQueryMessage> {
 
   public static async parse(message: RecordsQueryMessage): Promise<RecordsQuery> {
     await validateAuthorizationIntegrity(message);
@@ -70,25 +66,32 @@ export class RecordsQuery extends Message {
     }
   }
 
-  /**
-   * Gets the criteria for exact matches and exclude other types of criteria such as range criteria.
-   * @returns object contain all exact-match criteria; empty object if no exact-match criterion is found.
-   */
-  public static getExactCriteria(filter: RecordsQueryFilter): { [key:string]: string } {
-    const filterCopy = { ... filter };
-    delete filterCopy.dateCreated;
+  public static convertFilter(filter: RecordsQueryFilter): Filter {
+    const filterCopy = { ...filter };
+    const { dateCreated } = filterCopy;
 
-    removeUndefinedProperties(filterCopy);
+    let rangeFilter: RangeFilter | undefined = undefined;
+    if (dateCreated !== undefined) {
+      if (dateCreated.to !== undefined && dateCreated.from !== undefined) {
+        rangeFilter = {
+          gte : dateCreated.from,
+          lt  : dateCreated.to,
+        };
+      } else if (dateCreated.to !== undefined) {
+        rangeFilter = {
+          lt: dateCreated.to,
+        };
+      } else if (dateCreated.from !== undefined) {
+        rangeFilter = {
+          gte: dateCreated.from,
+        };
+      }
+    }
 
-    return filterCopy as { [key:string]: string };
-  }
+    if (rangeFilter) {
+      (filterCopy as Filter).dateCreated = rangeFilter;
+    }
 
-  /**
-   * Gets the list of range criteria (e.g. `dateCreated`) and exclude other types of criteria such as exact matches.
-   * @returns object contain all range criteria; empty object if no range criterion is found.
-   */
-  public static getRangeCriteria(filter: RecordsQueryFilter): { [key:string]: RangeCriterion } {
-    const rangeCriteria = filter.dateCreated ? { dateCreated: filter.dateCreated } : { };
-    return rangeCriteria;
+    return filterCopy as Filter;
   }
 }
